@@ -1,4 +1,5 @@
 import os
+import argparse
 import pandas as pd
 import xml.etree.ElementTree as ET
 
@@ -83,3 +84,43 @@ class AnnotationConverter:
             txt_file = os.path.join(self.output_dir, img_name.replace('.jpg','.txt'))
             with open(txt_file, 'w') as f:
                 f.write('\n'.join(lines))
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Convert RBC XML annotations to CSV/YOLO labels")
+    parser.add_argument(
+        "--annotations_dir",
+        default="dataset-master/dataset-master/Annotations",
+        help="Folder chua file XML Pascal VOC",
+    )
+    parser.add_argument(
+        "--output_dir",
+        default="dataset-master/dataset-master/YOLO_labels",
+        help="Folder luu annotation da convert",
+    )
+    parser.add_argument(
+        "--img_dir",
+        default="dataset-master/dataset-master/JPEGImages",
+        help="Folder anh dung de lay kich thuoc khi convert YOLO txt",
+    )
+    parser.add_argument("--classes", default="RBC", help="Danh sach class cach nhau bang dau phay")
+    parser.add_argument("--make_yolo_txt", action="store_true", help="Tao them file label .txt theo format YOLO")
+    args = parser.parse_args()
+
+    classes = [name.strip() for name in args.classes.split(",") if name.strip()]
+    converter = AnnotationConverter(
+        annotations_dir=args.annotations_dir,
+        output_dir=args.output_dir,
+        classes=classes,
+    )
+    df = converter.convert_all_xml()
+    csv_file = os.path.join(args.output_dir, "annotations_converted.csv")
+    print(df["class_id"].value_counts().sort_index())
+
+    if args.make_yolo_txt:
+        converter.csv_to_yolo(csv_file, args.img_dir)
+        print(f"[INFO] Saved YOLO txt labels to {args.output_dir}")
+
+
+if __name__ == "__main__":
+    main()

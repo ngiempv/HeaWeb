@@ -2,3 +2,10 @@
 
 __pycache__/
 *.pyc
+Ultralytics/
+.ultralytics/
+saved_models/
+runs/
+dataset-master/rbc_yolo_dataset/
+dataset-master/YOLO_labels/
+dataset-master/dataset-master/YOLO_labels/

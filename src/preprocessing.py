@@ -15,13 +15,12 @@ class Preprocessing:
         self.img_size = img_size
         self.normalize = transforms.Normalize(mean=normalize_mean, std=normalize_std)
 
+    """Load image và convert sang RGB"""
     def load_image(self, path):
-        """Load image và convert sang RGB"""
         img = Image.open(path).convert("RGB")
         return img
 
     def resize(self, img):
-        """Resize ảnh về img_size"""
         return img.resize(self.img_size)
 
     def to_tensor(self, img):
@@ -43,8 +42,9 @@ class Preprocessing:
         img = transforms.functional.rotate(img, angle)
         return img
 
+
+    """Lọc ảnh nhòe bằng Laplacian variance"""
     def filter_blur(self, img, threshold=100):
-        """Lọc ảnh nhòe bằng Laplacian variance"""
         img_cv = np.array(img.convert("L"))
         variance = cv2.Laplacian(img_cv, cv2.CV_64F).var()
         return variance > threshold
@@ -72,8 +72,9 @@ class Preprocessing:
         :param labels: labels (n,)
         """
         img = self.load_image(path)
-        if not self.filter_blur(img):
-            return None, None, None
+        # Do not filter blur for detection images because multi-cell microscopy
+        # images can have valid low-variance structure even when the Laplacian
+        # variance is low.
         orig_size = img.size
         img = self.resize(img)
         img_tensor = self.to_tensor(img)

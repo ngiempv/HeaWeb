@@ -59,9 +59,22 @@ class CellDataset(Dataset):
             df_img = self.df[self.df['image']==img_name]
             boxes = df_img[['xmin','ymin','xmax','ymax']].to_numpy()
             labels = df_img['class_id'].to_numpy()
+
+            attempts = 0
             img_tensor, boxes_scaled, labels_out = self.preprocessor.preprocess_detection(img_path, boxes, labels)
+            while img_tensor is None and attempts < len(self):
+                attempts += 1
+                idx = (idx + 1) % len(self)
+                img_name = self.samples[idx]
+                img_path = os.path.join(self.img_dir, img_name)
+                df_img = self.df[self.df['image']==img_name]
+                boxes = df_img[['xmin','ymin','xmax','ymax']].to_numpy()
+                labels = df_img['class_id'].to_numpy()
+                img_tensor, boxes_scaled, labels_out = self.preprocessor.preprocess_detection(img_path, boxes, labels)
+
             if img_tensor is None:
-                return self.__getitem__((idx+1)%len(self))
+                raise RuntimeError('Detection dataset contains no valid images after preprocessing.')
+
             target = {
                 'boxes': torch.tensor(boxes_scaled, dtype=torch.float32),
                 'labels': torch.tensor(labels_out, dtype=torch.int64)

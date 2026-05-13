@@ -1,11 +1,13 @@
 import torch
 from torch.utils.data import DataLoader
 from .model.yolov5 import YOLOv5Wrapper
+from .model.wbc_classifier import WBCClassifier, build_wbc_transforms
 import numpy as np
-from sklearn.metrics import precision_score, recall_score, f1_score, confusion_matrix
+from sklearn.metrics import precision_score, recall_score, f1_score, confusion_matrix, accuracy_score
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from PIL import Image
+from torchvision import datasets
 
 class Evaluator:
     """
@@ -22,9 +24,16 @@ class Evaluator:
         self.model_type = model_type
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
         self.img_size = img_size
-        self.classes = classes or ['NEUTROPHIL','LYMPHOCYTE','MONOCYTE','EOSINOPHIL','ABNORMAL']
+        if classes is not None:
+            self.classes = classes
+        elif model_type == 'classification':
+            self.classes = ['NEUTROPHIL','LYMPHOCYTE','MONOCYTE','EOSINOPHIL','BASOPHIL']
+        else:
+            self.classes = ['RBC']
 
-        if model_type == 'sparse_rcnn':
+        if model_type == 'classification':
+            self.model = None
+        elif model_type == 'sparse_rcnn':
             try:
                 from .model.sparse_rcnn import SparseRCNNModel
             except ImportError as e:
@@ -40,11 +49,33 @@ class Evaluator:
         else:
             self.model = YOLOv5Wrapper(weights=model_weights, num_classes=len(self.classes), img_size=img_size)
 
+    @classmethod
+    def for_wbc_classifier(cls, weights_path, img_size=224, device=None):
+        device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
+        ckpt = torch.load(weights_path, map_location=device)
+        class_names = ckpt.get('class_names')
+        backbone = ckpt.get('backbone', 'resnet18')
+        model = WBCClassifier(num_classes=len(class_names), backbone=backbone, pretrained=False)
+        model.load_state_dict(ckpt['model_state_dict'])
+        model.to(device)
+        model.eval()
+        obj = cls.__new__(cls)
+        obj.model_type = 'classification'
+        obj.device = device
+        obj.img_size = img_size
+        obj.classes = class_names
+        obj.model = model
+        obj.class_names = class_names
+        obj.backbone = backbone
+        return obj
+
     def evaluate_dataset(self, dataset, batch_size=2):
         """
         Đánh giá toàn bộ dataset
         :param dataset: CellDataset detection
         """
+        if self.model_type == 'classification':
+            raise ValueError('Use evaluate_wbc_classifier for classification tasks.')
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=lambda x: tuple(zip(*x)))
         all_preds = []
         all_labels = []
@@ -90,6 +121,8 @@ class Evaluator:
         :param img_tensor: tensor [C,H,W]
         :param target: dict {'boxes', 'labels'} optional
         """
+        if self.model_type == 'classification':
+            raise ValueError('visualize_prediction is not intended for classification tasks.')
         if self.model_type == 'sparse_rcnn':
             self.model.eval()
             with torch.no_grad():
@@ -131,3 +164,36 @@ class Evaluator:
         if show:
             plt.show()
         plt.close()
+
+    def evaluate_wbc_classifier(self, imagefolder_root, batch_size=16):
+        """
+        Danh gia classifier tren ImageFolder.
+        """
+        if self.model_type not in ['classification', 'wbc_classifier']:
+            raise ValueError('evaluate_wbc_classifier requires a classification evaluator')
+
+        ds = datasets.ImageFolder(imagefolder_root, transform=build_wbc_transforms(self.img_size, train=False))
+        loader = DataLoader(ds, batch_size=batch_size, shuffle=False)
+        y_true = []
+        y_pred = []
+
+        self.model.eval()
+        with torch.no_grad():
+            for imgs, labels in loader:
+                imgs = imgs.to(self.device)
+                labels = labels.to(self.device)
+                logits = self.model(imgs)
+                preds = torch.argmax(logits, dim=1)
+                y_true.extend(labels.cpu().tolist())
+                y_pred.extend(preds.cpu().tolist())
+
+        acc = accuracy_score(y_true, y_pred)
+        precision = precision_score(y_true, y_pred, average='macro', zero_division=0)
+        recall = recall_score(y_true, y_pred, average='macro', zero_division=0)
+        f1 = f1_score(y_true, y_pred, average='macro', zero_division=0)
+        cm = confusion_matrix(y_true, y_pred)
+
+        print(f"Accuracy: {acc:.4f}, Precision: {precision:.4f}, Recall: {recall:.4f}, F1-score: {f1:.4f}")
+        print("Confusion Matrix:")
+        print(cm)
+        return acc, precision, recall, f1, cm

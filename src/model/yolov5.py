@@ -2,11 +2,14 @@ import torch
 from pathlib import Path
 from torchvision import transforms
 from torch.utils.data import DataLoader
+import numpy as np
+import os
 from ..preprocessing import Preprocessing
 
 class YOLOv5Wrapper:
     """
-    Wrapper cho YOLOv5: train, detect, export
+    Wrapper cho YOLO qua package ultralytics: train, detect, export.
+    Ten file giu la yolov5.py de khong lam vo cac import cu trong project.
     """
     def __init__(self, weights=None, img_size=640, device=None, num_classes=5):
         """
@@ -19,44 +22,36 @@ class YOLOv5Wrapper:
         self.num_classes = num_classes
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
 
-        # Load model YOLOv5 từ ultralytics
-        from yolov5 import YOLO  # pip install yolov5
+        # Keep Ultralytics config inside the project so notebook/web runs do not
+        # fail on restricted Windows profile directories.
+        project_root = Path(__file__).resolve().parents[2]
+        yolo_config_dir = project_root / ".ultralytics"
+        yolo_config_dir.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault("YOLO_CONFIG_DIR", str(yolo_config_dir))
+
+        # Load model YOLO from ultralytics.
+        from ultralytics import YOLO
         if weights is not None:
             self.model = YOLO(weights)
         else:
-            # khởi tạo model mới với num_classes
-            self.model = YOLO('yolov5s.yaml')  
-            self.model.model.nc = num_classes
+            self.model = YOLO('yolov8n.yaml')
         self.model.to(self.device)
 
-    def train(self, train_loader, val_loader=None, epochs=10, lr=0.01):
+    def train(self, data_yaml, epochs=10, lr=0.01, batch=4, project="runs", name="rbc_yolo"):
         """
-        Train YOLOv5 trên CellDataset
+        Train YOLO bang format dataset cua Ultralytics.
+        data_yaml la file .yaml co train/val/images/labels.
         """
-        for epoch in range(epochs):
-            self.model.train()
-            for imgs, targets in train_loader:
-                # imgs: [B,C,H,W], targets: dict boxes + labels
-                # YOLOv5 expects list of images in numpy uint8
-                imgs_np = [img.permute(1,2,0).cpu().numpy()*255 for img in imgs]
-                labels_list = []
-                for t in targets:
-                    boxes = t['boxes'].cpu().numpy()
-                    labels = t['labels'].cpu().numpy()
-                    # YOLOv5 format: [class, x_center, y_center, w, h] normalized
-                    H,W = imgs_np[0].shape[:2]
-                    boxes_norm = []
-                    for i in range(len(labels)):
-                        x_center = (boxes[i,0]+boxes[i,2])/2 / W
-                        y_center = (boxes[i,1]+boxes[i,3])/2 / H
-                        w = (boxes[i,2]-boxes[i,0])/W
-                        h = (boxes[i,3]-boxes[i,1])/H
-                        boxes_norm.append([labels[i], x_center, y_center, w, h])
-                    labels_list.append(boxes_norm)
-                # forward + loss
-                self.model.train_step(imgs_np, labels_list)
-
-            print(f"Epoch {epoch+1}/{epochs} done")
+        return self.model.train(
+            data=data_yaml,
+            epochs=epochs,
+            imgsz=self.img_size,
+            batch=batch,
+            lr0=lr,
+            device=self.device,
+            project=project,
+            name=name,
+        )
 
     def detect(self, imgs):
         """
@@ -71,7 +66,20 @@ class YOLOv5Wrapper:
                 if torch.is_tensor(img):
                     img = (img.permute(1,2,0).cpu().numpy()*255).astype('uint8')
                 pred = self.model.predict(img)
-                results.append(pred)
+                if isinstance(pred, (list, tuple)):
+                    pred = pred[0]
+                if hasattr(pred, 'boxes'):
+                    boxes = pred.boxes
+                    if len(boxes) == 0:
+                        results.append(np.zeros((0, 6), dtype=np.float32))
+                    else:
+                        xyxy = boxes.xyxy.cpu().numpy()
+                        cls = boxes.cls.cpu().numpy().reshape(-1, 1)
+                        conf = boxes.conf.cpu().numpy().reshape(-1, 1)
+                        arr = np.concatenate([cls, xyxy, conf], axis=1).astype(np.float32)
+                        results.append(arr)
+                else:
+                    results.append(pred)
         return results
 
     def save(self, path):

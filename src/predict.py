@@ -21,7 +21,7 @@ class Predictor:
         self.model_type = model_type
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
         self.img_size = img_size
-        self.classes = classes or ['NEUTROPHIL','LYMPHOCYTE','MONOCYTE','EOSINOPHIL','ABNORMAL']
+        self.classes = classes or ['RBC']
 
         # Load model
         if model_type == 'sparse_rcnn':
@@ -109,3 +109,9 @@ class Predictor:
             out_path = os.path.join(save_dir, fname) if save_dir else None
             self.visualize_prediction(img_tensor, pred, save_path=out_path)
             print(f"[INFO] Processed {fname}")
+
+    def predict_image_path(self, img_path):
+        """
+        Alias nho de notebook goi nhanh.
+        """
+        return self.predict_image(img_path)
