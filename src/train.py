@@ -3,6 +3,8 @@ import argparse
 import time
 import platform
 import sys
+import shutil
+from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 from .dataloader import CellDataset
@@ -28,7 +30,7 @@ def _progress_line(prefix, current, total, elapsed, loss=None, width=26):
     current = min(current, total)
     pct = current / total
     filled = int(width * pct)
-    bar = "█" * filled + " " * (width - filled)
+    bar = "=" * filled + "-" * (width - filled)
     elapsed_txt = _format_duration(elapsed)
     if current >= total and elapsed > 0:
         rate = elapsed / total
@@ -114,7 +116,24 @@ def train_yolov5(args):
         project=args.save_dir,
         name='rbc_yolo',
     )
-    print(f"[INFO] YOLO training finished. Check {os.path.join(args.save_dir, 'rbc_yolo')}")
+    fixed_weight_dir = Path(args.save_dir) / "rbc_yolo" / "weights"
+    fixed_weight_dir.mkdir(parents=True, exist_ok=True)
+
+    candidate_paths = sorted(
+        Path("runs").glob("detect/**/weights/best.pt"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if candidate_paths:
+        src_best = candidate_paths[0]
+        dst_best = fixed_weight_dir / "best.pt"
+        shutil.copy2(src_best, dst_best)
+        last_src = src_best.with_name("last.pt")
+        if last_src.exists():
+            shutil.copy2(last_src, fixed_weight_dir / "last.pt")
+        print(f"[INFO] YOLO training finished. Best weights copied to {dst_best}")
+    else:
+        print(f"[WARN] YOLO training finished but no best.pt found under runs/detect")
 
 def train_wbc_classifier(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
