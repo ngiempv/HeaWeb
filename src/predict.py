@@ -1,6 +1,6 @@
 import torch
 from .model.yolov5 import YOLOv5Wrapper
-from .preprocessing import Preprocessing
+from .preprocessing import DetectionPreprocessing
 from PIL import Image
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
@@ -40,7 +40,7 @@ class Predictor:
         else:
             self.model = YOLOv5Wrapper(weights=weights, num_classes=len(self.classes), img_size=img_size)
 
-        self.preprocessor = Preprocessing(img_size=(img_size, img_size))
+        self.preprocessor = DetectionPreprocessing(img_size=(img_size, img_size))
 
     def predict_image(self, img_path):
         """
@@ -48,7 +48,7 @@ class Predictor:
         :param img_path: đường dẫn ảnh
         :return: predictions dict: boxes, labels, scores
         """
-        img_tensor, boxes, labels = self.preprocessor.preprocess_detection(img_path)
+        img_tensor, boxes, labels = self.preprocessor.preprocess(img_path)
         if img_tensor is None:
             return None
 

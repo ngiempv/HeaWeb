@@ -3,7 +3,7 @@ import torch
 from torch.utils.data import Dataset
 import pandas as pd
 import numpy as np
-from .preprocessing import Preprocessing
+from .preprocessing import ClassificationPreprocessing, DetectionPreprocessing
 
 class CellDataset(Dataset):
     """
@@ -24,7 +24,10 @@ class CellDataset(Dataset):
         self.img_dir = img_dir
         self.augment = augment
         self.classes = classes
-        self.preprocessor = Preprocessing(img_size=img_size)
+        if dataset_type == 'classification':
+            self.preprocessor = ClassificationPreprocessing(img_size=img_size)
+        else:
+            self.preprocessor = DetectionPreprocessing(img_size=img_size)
         
         if dataset_type == 'classification':
             # Tạo list (img_path, label)
@@ -47,7 +50,7 @@ class CellDataset(Dataset):
     def __getitem__(self, idx):
         if self.dataset_type == 'classification':
             img_path, label = self.samples[idx]
-            img_tensor = self.preprocessor.preprocess_classification(img_path, augment=self.augment)
+            img_tensor = self.preprocessor.preprocess(img_path, augment=self.augment)
             if img_tensor is None:
                 # Nếu ảnh bị blur hoặc lỗi, random chọn ảnh khác
                 return self.__getitem__((idx+1)%len(self))
@@ -61,7 +64,7 @@ class CellDataset(Dataset):
             labels = df_img['class_id'].to_numpy()
 
             attempts = 0
-            img_tensor, boxes_scaled, labels_out = self.preprocessor.preprocess_detection(img_path, boxes, labels)
+            img_tensor, boxes_scaled, labels_out = self.preprocessor.preprocess(img_path, boxes, labels)
             while img_tensor is None and attempts < len(self):
                 attempts += 1
                 idx = (idx + 1) % len(self)
@@ -70,7 +73,7 @@ class CellDataset(Dataset):
                 df_img = self.df[self.df['image']==img_name]
                 boxes = df_img[['xmin','ymin','xmax','ymax']].to_numpy()
                 labels = df_img['class_id'].to_numpy()
-                img_tensor, boxes_scaled, labels_out = self.preprocessor.preprocess_detection(img_path, boxes, labels)
+                img_tensor, boxes_scaled, labels_out = self.preprocessor.preprocess(img_path, boxes, labels)
 
             if img_tensor is None:
                 raise RuntimeError('Detection dataset contains no valid images after preprocessing.')

@@ -1,5 +1,8 @@
 import os
 import argparse
+import time
+import platform
+import sys
 import torch
 from torch.utils.data import DataLoader
 from .dataloader import CellDataset
@@ -8,6 +11,34 @@ from .model.wbc_classifier import WBCClassifier, build_wbc_transforms
 from .yolo_dataset import prepare_yolo_detection_dataset
 from torchvision import datasets
 from torch import nn
+
+def _format_duration(seconds):
+    seconds = int(round(seconds))
+    mins, secs = divmod(seconds, 60)
+    hrs, mins = divmod(mins, 60)
+    if hrs > 0:
+        return f"{hrs}h{mins:02d}m{secs:02d}s"
+    if mins > 0:
+        return f"{mins}m{secs:02d}s"
+    return f"{secs}s"
+
+
+def _progress_line(prefix, current, total, elapsed, loss=None, width=26):
+    total = max(1, total)
+    current = min(current, total)
+    pct = current / total
+    filled = int(width * pct)
+    bar = "█" * filled + " " * (width - filled)
+    elapsed_txt = _format_duration(elapsed)
+    if current >= total and elapsed > 0:
+        rate = elapsed / total
+        remaining = 0.0
+    else:
+        rate = elapsed / current if current > 0 else 0.0
+        remaining = max(0.0, rate * (total - current))
+    remaining_txt = _format_duration(remaining)
+    extra = f", loss={loss:.3f}" if loss is not None else ""
+    return f"{prefix}: {current:>3}/{total} |{bar}| {pct*100:5.1f}% [{elapsed_txt}<{remaining_txt}{extra}]"
 
 def train_sparse_rcnn(args):
     try:
@@ -89,27 +120,51 @@ def train_wbc_classifier(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     train_root = args.train_root
     val_root = args.val_root or args.train_root
+    num_workers = 0 if platform.system().lower().startswith("win") else 4
 
+    print(
+        f"[INFO] Start WBC training | device={device} | "
+        f"train_root={train_root} | val_root={val_root}",
+        flush=True,
+    )
+
+    print("[INFO] Loading datasets...", flush=True)
     train_ds = datasets.ImageFolder(train_root, transform=build_wbc_transforms(args.img_size, train=True))
     val_ds = datasets.ImageFolder(val_root, transform=build_wbc_transforms(args.img_size, train=False))
+    print(f"[INFO] Train samples: {len(train_ds)} | Val samples: {len(val_ds)}", flush=True)
+    print(f"[INFO] Classes: {train_ds.classes}", flush=True)
 
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=4)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=4)
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=num_workers)
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=num_workers)
 
+    print("[INFO] Building model...", flush=True)
     class_names = train_ds.classes
     model = WBCClassifier(num_classes=len(class_names), backbone=args.backbone, pretrained=args.pretrained)
     model.to(device)
+    print("[INFO] Model ready. Starting training loop...", flush=True)
+    class_text = ", ".join(class_names)
+    print(f"[INFO] Data  : train={train_root} | val={val_root}", flush=True)
+    print(f"[INFO] Class : {class_text}", flush=True)
+    print(f"[INFO] Model : WBC classifier ({args.backbone})", flush=True)
 
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     best_val_loss = float('inf')
     os.makedirs(args.save_dir, exist_ok=True)
+    total_start = time.time()
 
     for epoch in range(args.epochs):
+        epoch_start = time.time()
         model.train()
         train_loss = 0.0
-        for images, labels in train_loader:
+        total_batches = len(train_loader)
+        print(f"Epoch {epoch+1}/{args.epochs}", flush=True)
+        print(
+            f"WBC classifier | train={train_root} | val={val_root} | classes={class_names}",
+            flush=True,
+        )
+        for batch_idx, (images, labels) in enumerate(train_loader, start=1):
             images = images.to(device)
             labels = labels.to(device)
 
@@ -119,13 +174,19 @@ def train_wbc_classifier(args):
             loss.backward()
             optimizer.step()
             train_loss += loss.item()
+            line = _progress_line("Train", batch_idx, total_batches, time.time() - epoch_start, loss.item())
+            sys.stdout.write("\r" + line)
+            sys.stdout.flush()
+        sys.stdout.write("\n")
+        sys.stdout.flush()
 
         model.eval()
         val_loss = 0.0
         correct = 0
         total = 0
+        total_val_batches = len(val_loader)
         with torch.no_grad():
-            for images, labels in val_loader:
+            for batch_idx, (images, labels) in enumerate(val_loader, start=1):
                 images = images.to(device)
                 labels = labels.to(device)
                 outputs = model(images)
@@ -134,9 +195,19 @@ def train_wbc_classifier(args):
                 preds = torch.argmax(outputs, dim=1)
                 correct += (preds == labels).sum().item()
                 total += labels.size(0)
+                line = _progress_line("Val  ", batch_idx, total_val_batches, time.time() - epoch_start)
+                sys.stdout.write("\r" + line)
+                sys.stdout.flush()
+        sys.stdout.write("\n")
+        sys.stdout.flush()
 
         acc = correct / max(1, total)
-        print(f"Epoch {epoch+1}/{args.epochs} | train_loss={train_loss:.4f} | val_loss={val_loss:.4f} | val_acc={acc:.4f}")
+        epoch_time = time.time() - epoch_start
+        print(
+            f"epoch_time={_format_duration(epoch_time)} | "
+            f"train_loss={train_loss:.4f} | val_loss={val_loss:.4f} | val_acc={acc:.4f}",
+            flush=True,
+        )
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -148,11 +219,14 @@ def train_wbc_classifier(args):
             }
             path = os.path.join(args.save_dir, 'wbc_classifier_best.pth')
             torch.save(ckpt, path)
-            print(f"[INFO] Best WBC classifier saved to {path}")
+            print(f"[INFO] Best checkpoint -> {path}", flush=True)
+
+    total_time = time.time() - total_start
+    print(f"\n[INFO] Training finished in {_format_duration(total_time)}", flush=True)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train blood cell models")
-    parser.add_argument('--task', type=str, default='detection', choices=['detection', 'classification'], help='Task type')
+    parser.add_argument('--task', type=str, default='classification', choices=['detection', 'classification'], help='Task type')
     parser.add_argument('--model', type=str, default='sparse_rcnn', choices=['sparse_rcnn','yolov5'], help='Detection model type')
     parser.add_argument('--img_dir', type=str, default=None, help='Image folder for detection')
     parser.add_argument('--ann_file', type=str, default=None, help='Annotations CSV for detection')

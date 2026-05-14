@@ -2,10 +2,11 @@ import cv2
 import numpy as np
 import torch
 from PIL import Image
-from .preprocessing import Preprocessing
+from .preprocessing import DetectionPreprocessing
 from .wbc_proposal import WBCProposal
 from .model.wbc_classifier import predict_class
 from .model.yolov5 import YOLOv5Wrapper
+from .visualization import draw_pipeline_result
 
 
 def load_rbc_detector(model_type='sparse_rcnn', weights=None, classes=None, img_size=224, device=None):
@@ -39,10 +40,9 @@ def load_rbc_detector(model_type='sparse_rcnn', weights=None, classes=None, img_
 
 class CellPipeline:
     """
-    Pipeline muc tieu cho notebook:
-    - RBC detector
-    - WBC proposal
-    - WBC classifier
+    Pipeline demo end-to-end.
+    Classification WBC la muc tieu chinh; RBC detector va WBC proposal la buoc ho tro
+    de tao crop tu anh kinh hien vi day du.
     """
 
     def __init__(
@@ -64,7 +64,7 @@ class CellPipeline:
         ]
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.img_size = img_size
-        self.preprocessor = Preprocessing(img_size=(img_size, img_size))
+        self.preprocessor = DetectionPreprocessing(img_size=(img_size, img_size))
         self.wbc_proposal = WBCProposal()
 
     @staticmethod
@@ -90,33 +90,17 @@ class CellPipeline:
             "wbc_predictions": [],
         }
 
-        if self.rbc_detector is not None:
-            rbc_preds = self._detect_rbc(image_bgr)
-            result["rbc_boxes"] = rbc_preds
-        else:
-            rbc_preds = []
+        rbc_preds = self.detect_rbc(image_bgr)
+        result["rbc_boxes"] = rbc_preds
 
-        wbc_boxes = self.wbc_proposal.propose(image_bgr, exclude_boxes=rbc_preds)
+        wbc_boxes = self.propose_wbc_boxes(image_bgr, exclude_boxes=rbc_preds)
         result["wbc_boxes"] = wbc_boxes
 
-        if self.wbc_classifier is not None and len(wbc_boxes) > 0:
-            crops = self.wbc_proposal.crop_boxes(image_bgr, wbc_boxes)
-            preds = []
-            for crop in crops:
-                preds.append(
-                    predict_class(
-                        self.wbc_classifier,
-                        crop,
-                        self.wbc_class_names,
-                        device=self.device,
-                        img_size=self.img_size,
-                    )
-                )
-            result["wbc_predictions"] = preds
+        result["wbc_predictions"] = self.classify_wbc_crops(image_bgr, wbc_boxes)
 
         return result
 
-    def _detect_rbc(self, image_bgr):
+    def detect_rbc(self, image_bgr):
         """
         Dung detector hien co de lay bbox RBC.
         Support cac wrapper detect hoac predict trong repo.
@@ -169,20 +153,36 @@ class CellPipeline:
 
         return []
 
+    def _detect_rbc(self, image_bgr):
+        return self.detect_rbc(image_bgr)
+
+    def propose_wbc_boxes(self, image_bgr, exclude_boxes=None):
+        """
+        Tao box ung vien WBC bang xu ly anh so, co the loai vung RBC truoc.
+        """
+        return self.wbc_proposal.propose(image_bgr, exclude_boxes=exclude_boxes or [])
+
+    def classify_wbc_crops(self, image_bgr, wbc_boxes):
+        """
+        Crop cac vung WBC candidate va phan loai bang classifier.
+        """
+        if self.wbc_classifier is None or len(wbc_boxes) == 0:
+            return []
+
+        crops = self.wbc_proposal.crop_boxes(image_bgr, wbc_boxes)
+        preds = []
+        for crop in crops:
+            preds.append(
+                predict_class(
+                    self.wbc_classifier,
+                    crop,
+                    self.wbc_class_names,
+                    device=self.device,
+                    img_size=self.img_size,
+                )
+            )
+        return preds
+
     @staticmethod
     def draw_result(result):
-        image = result["image_bgr"].copy()
-
-        for x1, y1, x2, y2 in result["rbc_boxes"]:
-            cv2.rectangle(image, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
-            cv2.putText(image, "RBC", (int(x1), max(0, int(y1) - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-
-        for i, box in enumerate(result["wbc_boxes"]):
-            x1, y1, x2, y2 = box
-            label = "WBC"
-            if i < len(result["wbc_predictions"]):
-                label = result["wbc_predictions"][i]["label"]
-            cv2.rectangle(image, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 2)
-            cv2.putText(image, label, (int(x1), max(0, int(y1) - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-
-        return image
+        return draw_pipeline_result(result)

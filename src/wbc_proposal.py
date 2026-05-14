@@ -12,13 +12,15 @@ class WBCProposal:
 
     def __init__(
         self,
-        min_area=250,
-        max_area=20000,
+        min_area=200,
+        max_area=60000,
+        max_candidates=30,
         hsv_ranges=None,
         lab_ranges=None,
     ):
         self.min_area = min_area
         self.max_area = max_area
+        self.max_candidates = max_candidates
         self.hsv_ranges = hsv_ranges or [
             ((0, 0, 0), (180, 120, 255)),
             ((90, 20, 20), (170, 255, 255)),
@@ -65,29 +67,23 @@ class WBCProposal:
         edges = cv2.Canny(gray_blur, 40, 120)
         color_mask = self._weak_color_contrast_mask(enhanced)
 
-        combined = cv2.bitwise_or(contrast_mask, texture_mask)
-        combined = cv2.bitwise_or(combined, otsu_mask)
-        combined = cv2.bitwise_or(combined, adaptive_mask)
-        combined = cv2.bitwise_or(combined, edges)
-        combined = cv2.bitwise_or(combined, color_mask)
-        combined = self._apply_exclude_mask(combined, exclude_mask)
-
         kernel = np.ones((5, 5), np.uint8)
-        combined = cv2.morphologyEx(combined, cv2.MORPH_OPEN, kernel)
-        combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel)
-        combined = cv2.dilate(combined, kernel, iterations=1)
-
-        contours, _ = cv2.findContours(combined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         boxes = []
+        candidate_masks = [
+            contrast_mask,
+            texture_mask,
+            otsu_mask,
+            adaptive_mask,
+            edges,
+            color_mask,
+        ]
 
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            if area < self.min_area or area > self.max_area:
-                continue
-            x, y, w, h = cv2.boundingRect(contour)
-            if w < 8 or h < 8:
-                continue
-            boxes.append([x, y, x + w, y + h])
+        for mask in candidate_masks:
+            clean = self._apply_exclude_mask(mask, exclude_mask)
+            clean = cv2.morphologyEx(clean, cv2.MORPH_OPEN, kernel)
+            clean = cv2.morphologyEx(clean, cv2.MORPH_CLOSE, kernel)
+            clean = cv2.dilate(clean, kernel, iterations=1)
+            boxes.extend(self._boxes_from_mask(clean))
 
         if not boxes:
             fallback = cv2.bitwise_or(contrast_mask, adaptive_mask)
@@ -96,21 +92,49 @@ class WBCProposal:
             fallback = cv2.morphologyEx(fallback, cv2.MORPH_OPEN, kernel)
             fallback = cv2.morphologyEx(fallback, cv2.MORPH_CLOSE, kernel)
             fallback = self._apply_exclude_mask(fallback, exclude_mask)
-            contours, _ = cv2.findContours(fallback, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            for contour in contours:
-                area = cv2.contourArea(contour)
-                if area < self.min_area or area > self.max_area:
-                    continue
-                x, y, w, h = cv2.boundingRect(contour)
-                if w < 8 or h < 8:
-                    continue
-                boxes.append([x, y, x + w, y + h])
+            boxes.extend(self._boxes_from_mask(fallback))
 
         if exclude_boxes:
             boxes = [box for box in boxes if not self._overlaps_excluded(box, exclude_boxes)]
 
+        boxes = self._deduplicate_boxes(boxes)
         boxes.sort(key=lambda b: (-(b[2] - b[0]) * (b[3] - b[1]), b[1], b[0]))
+        return boxes[: self.max_candidates]
+
+    def _boxes_from_mask(self, mask):
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        boxes = []
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < self.min_area or area > self.max_area:
+                continue
+            x, y, w, h = cv2.boundingRect(contour)
+            if w < 8 or h < 8:
+                continue
+            boxes.append([x, y, x + w, y + h])
         return boxes
+
+    def _deduplicate_boxes(self, boxes, iou_threshold=0.45):
+        boxes = sorted(boxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]), reverse=True)
+        kept = []
+        for box in boxes:
+            if all(self._box_iou(box, kept_box) < iou_threshold for kept_box in kept):
+                kept.append(box)
+        return kept
+
+    @staticmethod
+    def _box_iou(box_a, box_b):
+        ax1, ay1, ax2, ay2 = box_a
+        bx1, by1, bx2, by2 = box_b
+        ix1 = max(ax1, bx1)
+        iy1 = max(ay1, by1)
+        ix2 = min(ax2, bx2)
+        iy2 = min(ay2, by2)
+        inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+        area_a = max(0, ax2 - ax1) * max(0, ay2 - ay1)
+        area_b = max(0, bx2 - bx1) * max(0, by2 - by1)
+        union = area_a + area_b - inter
+        return inter / union if union > 0 else 0.0
 
     @staticmethod
     def _enhance_contrast(image_bgr):
