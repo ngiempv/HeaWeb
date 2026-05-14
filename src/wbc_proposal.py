@@ -5,16 +5,15 @@ import numpy as np
 class WBCProposal:
     """
     Tao box ung vien WBC bang xu ly anh so.
-    Khong gia dinh WBC phai co mau tim; uu tien dua vao do tuong phan,
-    cau truc va su khac biet so voi nen RBC. Mau chi la cue phu.
-    Neu co box RBC tu detector, cac vung RBC se bi loai tru truoc khi lay contour.
+    Khong coi mau tim la dau hieu duy nhat; uu tien do tuong phan va cau truc.
+    Neu co box RBC, se loai tru cac vung RBC truoc khi tim proposal WBC.
     """
 
     def __init__(
         self,
-        min_area=200,
-        max_area=60000,
-        max_candidates=30,
+        min_area=600,
+        max_area=120000,
+        max_candidates=15,
         hsv_ranges=None,
         lab_ranges=None,
     ):
@@ -29,19 +28,6 @@ class WBCProposal:
             ((0, 120, 120), (255, 180, 220)),
         ]
 
-    def _mask_from_ranges(self, img, ranges, color_space):
-        if color_space == "hsv":
-            converted = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-        elif color_space == "lab":
-            converted = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-        else:
-            raise ValueError(f"Unsupported color_space: {color_space}")
-
-        mask = np.zeros(converted.shape[:2], dtype=np.uint8)
-        for lower, upper in ranges:
-            mask |= cv2.inRange(converted, np.array(lower, dtype=np.uint8), np.array(upper, dtype=np.uint8))
-        return mask
-
     def propose(self, image_bgr, exclude_boxes=None):
         """
         Tra ve list box [x1, y1, x2, y2] ung vien WBC.
@@ -49,12 +35,29 @@ class WBCProposal:
         if image_bgr is None:
             return []
 
-        exclude_mask = self._build_exclude_mask(image_bgr.shape[:2], exclude_boxes)
+        h, w = image_bgr.shape[:2]
+        dynamic_min_area = max(self.min_area, int(h * w * 0.0015))
+        dynamic_max_area = max(self.max_area, int(h * w * 0.25))
+
+        exclude_mask = self._build_exclude_mask((h, w), exclude_boxes)
         enhanced = self._enhance_contrast(image_bgr)
         gray = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
         gray_blur = cv2.GaussianBlur(gray, (5, 5), 0)
+
+        purple_mask = self._purple_mask(enhanced)
         contrast_mask = self._contrast_mask(enhanced)
         texture_mask = self._texture_mask(gray_blur)
+        color_mask = self._weak_color_contrast_mask(enhanced)
+        edges = cv2.Canny(gray_blur, 40, 120)
+
+        candidate_masks = [
+            purple_mask,
+            contrast_mask,
+            texture_mask,
+            color_mask,
+            edges,
+        ]
+
         _, otsu_mask = cv2.threshold(gray_blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         adaptive_mask = cv2.adaptiveThreshold(
             gray_blur,
@@ -64,63 +67,227 @@ class WBCProposal:
             31,
             7,
         )
-        edges = cv2.Canny(gray_blur, 40, 120)
-        color_mask = self._weak_color_contrast_mask(enhanced)
 
-        kernel = np.ones((5, 5), np.uint8)
         boxes = []
-        candidate_masks = [
-            contrast_mask,
-            texture_mask,
-            otsu_mask,
-            adaptive_mask,
-            edges,
-            color_mask,
-        ]
+        kernel_open = np.ones((3, 3), np.uint8)
+        kernel_close = np.ones((7, 7), np.uint8)
+        kernel_dilate = np.ones((3, 3), np.uint8)
 
         for mask in candidate_masks:
             clean = self._apply_exclude_mask(mask, exclude_mask)
-            clean = cv2.morphologyEx(clean, cv2.MORPH_OPEN, kernel)
-            clean = cv2.morphologyEx(clean, cv2.MORPH_CLOSE, kernel)
-            clean = cv2.dilate(clean, kernel, iterations=1)
-            boxes.extend(self._boxes_from_mask(clean))
+            clean = cv2.morphologyEx(clean, cv2.MORPH_OPEN, kernel_open)
+            clean = cv2.morphologyEx(clean, cv2.MORPH_CLOSE, kernel_close)
+            clean = cv2.dilate(clean, kernel_dilate, iterations=1)
+            boxes.extend(self._boxes_from_mask(clean, dynamic_min_area, dynamic_max_area))
 
         if not boxes:
-            fallback = cv2.bitwise_or(contrast_mask, adaptive_mask)
-            fallback = cv2.bitwise_or(fallback, otsu_mask)
+            fallback = cv2.bitwise_or(otsu_mask, adaptive_mask)
             fallback = cv2.bitwise_or(fallback, texture_mask)
-            fallback = cv2.morphologyEx(fallback, cv2.MORPH_OPEN, kernel)
-            fallback = cv2.morphologyEx(fallback, cv2.MORPH_CLOSE, kernel)
             fallback = self._apply_exclude_mask(fallback, exclude_mask)
-            boxes.extend(self._boxes_from_mask(fallback))
+            fallback = cv2.morphologyEx(fallback, cv2.MORPH_OPEN, kernel_open)
+            fallback = cv2.morphologyEx(fallback, cv2.MORPH_CLOSE, kernel_close)
+            fallback = cv2.dilate(fallback, kernel_dilate, iterations=1)
+            boxes = self._boxes_from_mask(fallback, dynamic_min_area, dynamic_max_area)
 
         if exclude_boxes:
-            boxes = [box for box in boxes if not self._overlaps_excluded(box, exclude_boxes)]
+            boxes = [box for box in boxes if not self._overlaps_excluded(box, exclude_boxes, iou_threshold=0.18)]
 
-        boxes = self._deduplicate_boxes(boxes)
+        boxes = self._expand_boxes(boxes, image_bgr.shape[:2])
+        boxes = self._rank_boxes_by_purple_score(boxes, enhanced, top_k=self.max_candidates * 3)
+        boxes = self._keep_strong_purple_boxes(boxes, enhanced, min_ratio=0.55)
+        boxes = self._merge_overlapping_boxes(boxes, iou_threshold=0.22)
+        boxes = self._remove_nested_small_boxes(boxes)
         boxes.sort(key=lambda b: (-(b[2] - b[0]) * (b[3] - b[1]), b[1], b[0]))
         return boxes[: self.max_candidates]
 
-    def _boxes_from_mask(self, mask):
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    def _boxes_from_mask(self, mask, min_area=None, max_area=None):
+        min_area = self.min_area if min_area is None else min_area
+        max_area = self.max_area if max_area is None else max_area
+        img_h, img_w = mask.shape[:2]
+        img_area = img_h * img_w
+        max_box_area = img_area * 0.18
+        num_labels, _, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
         boxes = []
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            if area < self.min_area or area > self.max_area:
+        for label in range(1, num_labels):
+            x = int(stats[label, cv2.CC_STAT_LEFT])
+            y = int(stats[label, cv2.CC_STAT_TOP])
+            w = int(stats[label, cv2.CC_STAT_WIDTH])
+            h = int(stats[label, cv2.CC_STAT_HEIGHT])
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            if area < min_area or area > max_area:
                 continue
-            x, y, w, h = cv2.boundingRect(contour)
-            if w < 8 or h < 8:
+            if w < 12 or h < 12:
+                continue
+            box_area = w * h
+            if box_area > max_box_area:
+                continue
+            if w > img_w * 0.65 or h > img_h * 0.75:
+                continue
+            fill_ratio = area / max(1, box_area)
+            if fill_ratio < 0.06:
+                continue
+            aspect = max(w / max(1, h), h / max(1, w))
+            if aspect > 5.0:
                 continue
             boxes.append([x, y, x + w, y + h])
         return boxes
 
-    def _deduplicate_boxes(self, boxes, iou_threshold=0.45):
+    def _merge_overlapping_boxes(self, boxes, iou_threshold=0.22):
+        if not boxes:
+            return []
+
         boxes = sorted(boxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]), reverse=True)
-        kept = []
+        merged = []
         for box in boxes:
-            if all(self._box_iou(box, kept_box) < iou_threshold for kept_box in kept):
-                kept.append(box)
+            placed = False
+            for idx, kept in enumerate(merged):
+                if self._box_iou(box, kept) >= iou_threshold:
+                    merged[idx] = [
+                        min(box[0], kept[0]),
+                        min(box[1], kept[1]),
+                        max(box[2], kept[2]),
+                        max(box[3], kept[3]),
+                    ]
+                    placed = True
+                    break
+            if not placed:
+                merged.append(list(box))
+
+        changed = True
+        while changed:
+            changed = False
+            next_merged = []
+            for box in merged:
+                absorbed = False
+                for idx, kept in enumerate(next_merged):
+                    if self._box_iou(box, kept) >= iou_threshold:
+                        next_merged[idx] = [
+                            min(box[0], kept[0]),
+                            min(box[1], kept[1]),
+                            max(box[2], kept[2]),
+                            max(box[3], kept[3]),
+                        ]
+                        absorbed = True
+                        changed = True
+                        break
+                if not absorbed:
+                    next_merged.append(box)
+            merged = next_merged
+        return merged
+
+    def _remove_nested_small_boxes(self, boxes):
+        if len(boxes) <= 1:
+            return boxes
+
+        filtered = []
+        for i, box in enumerate(boxes):
+            x1, y1, x2, y2 = box
+            area = max(0, x2 - x1) * max(0, y2 - y1)
+            keep = True
+            for j, other in enumerate(boxes):
+                if i == j:
+                    continue
+                ox1, oy1, ox2, oy2 = other
+                other_area = max(0, ox2 - ox1) * max(0, oy2 - oy1)
+                if other_area <= area:
+                    continue
+                ix1 = max(x1, ox1)
+                iy1 = max(y1, oy1)
+                ix2 = min(x2, ox2)
+                iy2 = min(y2, oy2)
+                inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+                if area > 0 and inter / area >= 0.80:
+                    keep = False
+                    break
+            if keep:
+                filtered.append(box)
+        return filtered
+
+    @staticmethod
+    def _rank_boxes_by_purple_score(boxes, image_bgr, top_k=None):
+        if not boxes:
+            return []
+
+        scored = []
+        h, w = image_bgr.shape[:2]
+        b, g, r = cv2.split(image_bgr)
+        purple_score = (r.astype(np.int16) + b.astype(np.int16) - 2 * g.astype(np.int16))
+        for box in boxes:
+            x1, y1, x2, y2 = box
+            x1 = max(0, min(w, int(x1)))
+            y1 = max(0, min(h, int(y1)))
+            x2 = max(0, min(w, int(x2)))
+            y2 = max(0, min(h, int(y2)))
+            if x2 <= x1 or y2 <= y1:
+                continue
+            patch = purple_score[y1:y2, x1:x2]
+            mean_score = float(np.mean(patch)) if patch.size else -999.0
+            scored.append((mean_score, [x1, y1, x2, y2]))
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        ranked = [box for _, box in scored]
+        if top_k is not None:
+            ranked = ranked[:top_k]
+        return ranked
+
+    @staticmethod
+    def _keep_strong_purple_boxes(boxes, image_bgr, min_ratio=0.55):
+        if not boxes:
+            return []
+
+        h, w = image_bgr.shape[:2]
+        b, g, r = cv2.split(image_bgr)
+        purple_score = (r.astype(np.int16) + b.astype(np.int16) - 2 * g.astype(np.int16))
+
+        scored = []
+        for box in boxes:
+            x1, y1, x2, y2 = box
+            x1 = max(0, min(w, int(x1)))
+            y1 = max(0, min(h, int(y1)))
+            x2 = max(0, min(w, int(x2)))
+            y2 = max(0, min(h, int(y2)))
+            if x2 <= x1 or y2 <= y1:
+                continue
+            patch = purple_score[y1:y2, x1:x2]
+            if patch.size == 0:
+                continue
+            mean_score = float(np.mean(patch))
+            scored.append((mean_score, [x1, y1, x2, y2]))
+
+        if not scored:
+            return []
+
+        max_score = max(score for score, _ in scored)
+        threshold = max_score * min_ratio
+        kept = [box for score, box in scored if score >= threshold]
+        if not kept:
+            kept = [box for _, box in scored[: max(1, min(3, len(scored)))]]
         return kept
+
+    @staticmethod
+    def _purple_mask(image_bgr):
+        b, g, r = cv2.split(image_bgr)
+        purple_score = (r.astype(np.int16) + b.astype(np.int16) - 2 * g.astype(np.int16))
+        purple_score = np.clip(purple_score + 128, 0, 255).astype(np.uint8)
+        _, mask = cv2.threshold(purple_score, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        mask = cv2.medianBlur(mask, 5)
+        return mask
+
+    @staticmethod
+    def _expand_boxes(boxes, shape_hw, pad_ratio=0.35, min_pad=16, max_pad=56):
+        h, w = shape_hw
+        expanded = []
+        for x1, y1, x2, y2 in boxes:
+            bw = max(1, x2 - x1)
+            bh = max(1, y2 - y1)
+            pad = int(min(max_pad, max(min_pad, max(bw, bh) * pad_ratio)))
+            expanded.append([
+                max(0, int(x1) - pad),
+                max(0, int(y1) - pad),
+                min(w, int(x2) + pad),
+                min(h, int(y2) + pad),
+            ])
+        return expanded
 
     @staticmethod
     def _box_iou(box_a, box_b):

@@ -1,9 +1,11 @@
-﻿*.docx
+*.docx
+~$*.docx
 
 __pycache__/
 *.pyc
 Ultralytics/
 .ultralytics/
+src/annotation_converter_note.txt
 saved_models/
 runs/
 dataset-master/rbc_yolo_dataset/

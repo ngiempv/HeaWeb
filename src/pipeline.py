@@ -60,12 +60,11 @@ class CellPipeline:
             "LYMPHOCYTE",
             "MONOCYTE",
             "EOSINOPHIL",
-            "BASOPHIL",
         ]
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.img_size = img_size
         self.preprocessor = DetectionPreprocessing(img_size=(img_size, img_size))
-        self.wbc_proposal = WBCProposal()
+        self.wbc_proposal = WBCProposal(min_area=500, max_candidates=18)
 
     @staticmethod
     def _load_bgr(image_path):
@@ -94,6 +93,7 @@ class CellPipeline:
         result["rbc_boxes"] = rbc_preds
 
         wbc_boxes = self.propose_wbc_boxes(image_bgr, exclude_boxes=rbc_preds)
+        wbc_boxes = self.filter_wbc_boxes_against_rbc(wbc_boxes, rbc_preds)
         result["wbc_boxes"] = wbc_boxes
 
         result["wbc_predictions"] = self.classify_wbc_crops(image_bgr, wbc_boxes)
@@ -161,6 +161,37 @@ class CellPipeline:
         Tao box ung vien WBC bang xu ly anh so, co the loai vung RBC truoc.
         """
         return self.wbc_proposal.propose(image_bgr, exclude_boxes=exclude_boxes or [])
+
+    @staticmethod
+    def filter_wbc_boxes_against_rbc(wbc_boxes, rbc_boxes, overlap_threshold=0.35):
+        """
+        Uu tien RBC: chi loai WBC candidate neu no chong len RBC qua nhieu.
+        Cac box nam sat RBC van duoc giu lai.
+        """
+        if not wbc_boxes or not rbc_boxes:
+            return list(wbc_boxes)
+
+        filtered = []
+        for box in wbc_boxes:
+            x1, y1, x2, y2 = box[:4]
+            box_area = max(0, x2 - x1) * max(0, y2 - y1)
+            if box_area == 0:
+                continue
+
+            drop = False
+            for ref in rbc_boxes:
+                rx1, ry1, rx2, ry2 = ref[:4]
+                ix1 = max(x1, rx1)
+                iy1 = max(y1, ry1)
+                ix2 = min(x2, rx2)
+                iy2 = min(y2, ry2)
+                inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+                if inter / box_area >= overlap_threshold:
+                    drop = True
+                    break
+            if not drop:
+                filtered.append(box)
+        return filtered
 
     def classify_wbc_crops(self, image_bgr, wbc_boxes):
         """

@@ -23,7 +23,10 @@ def draw_boxes(image_bgr, boxes, label="BOX", color=(0, 255, 0), thickness=2):
 def draw_pipeline_result(result):
     image = result["image_bgr"].copy()
 
-    for box in result.get("rbc_boxes", []):
+    wbc_boxes = result.get("wbc_boxes", [])
+    rbc_boxes = result.get("rbc_boxes", [])
+
+    for box in rbc_boxes:
         x1, y1, x2, y2 = box[:4]
         cv2.rectangle(image, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
         cv2.putText(
@@ -37,7 +40,7 @@ def draw_pipeline_result(result):
         )
 
     wbc_predictions = result.get("wbc_predictions", [])
-    for idx, box in enumerate(result.get("wbc_boxes", [])):
+    for idx, box in enumerate(wbc_boxes):
         x1, y1, x2, y2 = box[:4]
         label = "WBC"
         if idx < len(wbc_predictions):
